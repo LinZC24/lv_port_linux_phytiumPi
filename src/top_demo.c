@@ -15,6 +15,7 @@
 typedef struct {
     lv_obj_t * arc;       /* 替换 meter 为 arc */
     lv_obj_t * label_val;
+    lv_obj_t * label_info;
     lv_obj_t * chart;
     lv_chart_series_t * ser;
     lv_obj_t * win;
@@ -26,6 +27,8 @@ typedef struct {
 /*********************
  *  STATIC VARIABLES
  *********************/
+ static long mem_total_kb = 0;
+static long mem_used_kb = 0;
 static monitor_item_t cpu_mon;
 static monitor_item_t gpu_mon;
 static monitor_item_t mem_mon;
@@ -65,20 +68,29 @@ static int get_cpu_usage(void)
 /* 读取内存使用率 (读取 /proc/meminfo) */
 static int get_mem_usage(void)
 {
-    long mem_total = 0, mem_available = 0;
+    long mem_available = 0;
     FILE *fp = fopen("/proc/meminfo", "r");
     if(!fp) return 0;
 
     char key[32];
     long value;
     char unit[8];
+    
+    // 重置读取
+    mem_total_kb = 0;
+    
     while(fscanf(fp, "%31s %ld %7s", key, &value, unit) == 3) {
-        if(strcmp(key, "MemTotal:") == 0) mem_total = value;
+        if(strcmp(key, "MemTotal:") == 0) mem_total_kb = value;
         else if(strcmp(key, "MemAvailable:") == 0) { mem_available = value; break; }
     }
     fclose(fp);
-    if(mem_total == 0) return 0;
-    return (int)((mem_total - mem_available) * 100 / mem_total);
+
+    if(mem_total_kb == 0) return 0;
+    
+    // 计算已用内存
+    mem_used_kb = mem_total_kb - mem_available;
+    
+    return (int)(mem_used_kb * 100 / mem_total_kb);
 }
 
 /*********************
@@ -123,10 +135,15 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
     lv_obj_remove_style(item->arc, NULL, LV_PART_KNOB);
     lv_obj_remove_flag(item->arc, LV_OBJ_FLAG_CLICKABLE);
 
+    item->label_info = lv_label_create(cont);
+    lv_label_set_text(item->label_info, ""); // 默认空，只有内存会更新它
+    lv_obj_set_style_text_font(item->label_info, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(item->label_info, lv_palette_main(LV_PALETTE_GREY), 0);
+
     item->label_val = lv_label_create(cont);
     lv_label_set_text(item->label_val, "0%");
 
-    /* --- 2. 弹窗与图表部分 (修改为带坐标轴的布局) --- */
+    /* --- 2. 弹窗与图表部分 (使用 Grid 布局修复错位) --- */
     item->win = lv_win_create(lv_screen_active());
     lv_win_add_title(item->win, title);
     
@@ -137,55 +154,73 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
     lv_obj_set_size(item->win, 600, 400);
     lv_obj_center(item->win);
 
-    /* 获取窗口内容容器，它默认是垂直布局 (Column) */
+    /* 获取窗口内容容器 */
     lv_obj_t * win_content = lv_win_get_content(item->win);
-    /* 允许内容滚动，防止刻度溢出 */
-    lv_obj_set_style_pad_all(win_content, 10, 0);
+    lv_obj_set_layout(win_content, LV_LAYOUT_GRID);
+    
+    /* --- 修改 1: 调整行高定义 --- */
+    /* 
+       原: {LV_GRID_FR(1), 40, 20, ...} 
+       问题: FR(1) 会把剩余空间全吃掉，导致图表区域很大，如果图表没填满就会有空隙。
+       修改: 将图表行设为 FR(1) 依然没问题，关键是让 X 轴紧贴上去。
+       我们把 X 轴行高设为 LV_GRID_CONTENT，让它紧凑一点。
+    */
+    static int32_t col_dsc[] = {40, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST}; // Y轴宽度减小到40
+    static int32_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_TEMPLATE_LAST};
+    lv_obj_set_grid_dsc_array(win_content, col_dsc, row_dsc);
 
-    /* --- 创建一个水平容器，用于并排显示 [Y轴刻度] 和 [图表] --- */
-    lv_obj_t * h_cont = lv_obj_create(win_content);
-    lv_obj_set_size(h_cont, LV_PCT(100), LV_PCT(75)); // 占用窗口高度的 75%
-    lv_obj_set_flex_flow(h_cont, LV_FLEX_FLOW_ROW);   // 水平排列
-    lv_obj_remove_style(h_cont, NULL, LV_PART_SCROLLBAR); // 移除滚动条
-    lv_obj_set_style_border_width(h_cont, 0, 0);      // 移除边框
-    lv_obj_set_style_pad_all(h_cont, 0, 0);           // 移除内边距
-    lv_obj_set_style_bg_opa(h_cont, LV_OPA_TRANSP, 0); // 透明背景
-
-    /* --- Y 轴刻度 (使用 lv_scale) --- */
-    lv_obj_t * scale_y = lv_scale_create(h_cont);
-    lv_obj_set_size(scale_y, 40, LV_PCT(100)); // 宽度40像素，高度填满
-    lv_scale_set_mode(scale_y, LV_SCALE_MODE_VERTICAL_LEFT); // 刻度在左侧
-    lv_scale_set_range(scale_y, 0, 100);       // 范围 0-100
-    lv_scale_set_total_tick_count(scale_y, 11); // 11个刻度 (0, 10, 20...100)
-    lv_scale_set_major_tick_every(scale_y, 5);  // 每5个小刻度一个大刻度
-    lv_obj_set_style_line_color(scale_y, lv_palette_main(LV_PALETTE_GREY), 0); // 刻度线颜色
+    /* --- Y 轴刻度 --- */
+    lv_obj_t * scale_y = lv_scale_create(win_content);
+    lv_obj_set_grid_cell(scale_y, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_scale_set_mode(scale_y, LV_SCALE_MODE_VERTICAL_LEFT);
+    lv_scale_set_range(scale_y, 0, 100);
+    lv_scale_set_total_tick_count(scale_y, 11);
+    lv_scale_set_major_tick_every(scale_y, 5);
+    lv_obj_set_style_line_color(scale_y, lv_palette_main(LV_PALETTE_GREY), 0);
 
     /* --- 图表 --- */
-    item->chart = lv_chart_create(h_cont);
-    lv_obj_set_flex_grow(item->chart, 1); // 自动填充剩余宽度
-    lv_obj_set_height(item->chart, LV_PCT(100)); // 高度填满
+    item->chart = lv_chart_create(win_content);
+    lv_obj_set_grid_cell(item->chart, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
     lv_chart_set_type(item->chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(item->chart, CHART_POINT_COUNT);
     lv_chart_set_range(item->chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    /* 稍微调整图表内边距，让线条不压住边框 */
-    lv_obj_set_style_pad_all(item->chart, 0, 0); 
+    lv_obj_set_style_border_width(item->chart, 1, 0);
+    lv_obj_set_style_border_color(item->chart, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    /* 关键: 移除图表底部的内边距，让它能紧贴 X 轴 */
+    lv_obj_set_style_pad_bottom(item->chart, 0, 0);
 
-    /* --- X 轴刻度 (放在水平容器下方) --- */
+    /* --- X 轴刻度 --- */
     lv_obj_t * scale_x = lv_scale_create(win_content);
-    lv_obj_set_size(scale_x, LV_PCT(85), 40); // 宽度略小于100%以对齐图表，高度40
-    lv_scale_set_mode(scale_x, LV_SCALE_MODE_HORIZONTAL_BOTTOM); // 刻度在下方
-    lv_scale_set_range(scale_x, 0, 20);       // 范围 0-20 (代表时间秒数)
+    lv_obj_set_grid_cell(scale_x, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 1, 1);
+    
+    /* --- 修改 2: 调整 X 轴高度和模式 --- */
+    lv_obj_set_height(scale_x, 40); // 显式设置高度
+    
+    /* 
+       LV_SCALE_MODE_HORIZONTAL_TOP: 刻度线在尺子上方 (指向图表)
+       LV_SCALE_MODE_HORIZONTAL_BOTTOM: 刻度线在尺子下方 (指向文字)
+       
+       如果你觉得现在的刻度线在数字上方很怪，可以改回 BOTTOM。
+       但为了紧贴图表，TOP 是对的，只是我们需要把数字移到下面去。
+       
+       简单方案：改回 BOTTOM，并让它向上偏移。
+    */
+    lv_scale_set_mode(scale_x, LV_SCALE_MODE_HORIZONTAL_TOP); 
+    
+    /* 关键: 强制让 X 轴向上移动，消除间隙 */
+    lv_obj_set_style_margin_top(scale_x, -10, 0); // 负边距拉近距离
+
+    lv_scale_set_range(scale_x, 0, 20);
     lv_scale_set_total_tick_count(scale_x, 11);
     lv_scale_set_major_tick_every(scale_x, 5);
     lv_obj_set_style_line_color(scale_x, lv_palette_main(LV_PALETTE_GREY), 0);
-    /* 向右偏移一点，以对齐图表区域 (跳过Y轴的宽度) */
-    lv_obj_set_style_margin_left(scale_x, 40, 0); 
 
-    /* --- 添加轴标题 --- */
+    /* --- X 轴标题 --- */
     lv_obj_t * x_label = lv_label_create(win_content);
-    lv_label_set_text(x_label, "Time (seconds ago)");
-    lv_obj_set_style_text_font(x_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_margin_left(x_label, 40, 0); // 对齐图表
+    lv_label_set_text(x_label, "Time (seconds)");
+    lv_obj_set_grid_cell(x_label, LV_GRID_ALIGN_CENTER, 1, 1, LV_GRID_ALIGN_CENTER, 2, 1);
+    /* 稍微向上一点 */
+    lv_obj_set_style_margin_top(x_label, -5, 0);
 
     /* 添加数据系列 */
     item->ser = lv_chart_add_series(item->chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
@@ -207,6 +242,14 @@ static void update_timer_cb(lv_timer_t * timer)
         lv_arc_set_value(item->arc, val);
         lv_label_set_text_fmt(item->label_val, "%d%%", val);
 
+        /* [新增] 如果是内存监视器，更新具体数值标签 */
+        if(item == &mem_mon) {
+            // 将 KB 转换为 MB 显示
+            int used_mb = mem_used_kb / 1024;
+            int total_mb = mem_total_kb / 1024;
+            lv_label_set_text_fmt(item->label_info, "%dMB / %dMB", used_mb, total_mb);
+        }
+
         /* 更新折线图 */
         if(item->chart) {
             lv_chart_set_next_value(item->chart, item->ser, val);
@@ -226,9 +269,9 @@ void top_demo_init(void)
     lv_obj_set_style_bg_color(main_cont, lv_color_hex(0xF0F0F0), 0);
 
     /* 创建三个监视器 */
-    create_monitor_widget(main_cont, &cpu_mon, "CPU Usage", get_cpu_usage);
+    create_monitor_widget(main_cont, &cpu_mon, "CPU Usage(%)", get_cpu_usage);
 
-    create_monitor_widget(main_cont, &mem_mon, "Memory Usage", get_mem_usage);
+    create_monitor_widget(main_cont, &mem_mon, "Memory Usage(%)", get_mem_usage);
 
     /* 启动定时器 */
     monitor_timer = lv_timer_create(update_timer_cb, 1000, NULL);
