@@ -30,8 +30,6 @@
 #include "src/lib/simulator_util.h"
 #include "src/lib/simulator_settings.h"
 
-#include "src/top_demo.h"
-
 /* Internal functions */
 static void configure_simulator(int argc, char **argv);
 static void print_lvgl_version(void);
@@ -160,10 +158,9 @@ int main(int argc, char **argv)
 #endif
 
     /*Create a Demo*/
-    //lv_demo_widgets();
-    //lv_demo_widgets_start_slideshow();
+    lv_demo_widgets();
+    lv_demo_widgets_start_slideshow();
 
-    top_demo_init();
     /* Enter the run loop */
     // 替换原来的 driver_backends_run_loop();
     printf("LVGL running... Press Ctrl+C to exit.\n");
