@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <signal.h>
 #include "lvgl/lvgl.h"
 #include "lvgl/demos/lv_demos.h"
 
@@ -38,7 +38,7 @@ static void print_usage(void);
 /* contains the name of the selected backend if user
  * has specified one on the command line */
 static char *selected_backend;
-
+static volatile bool keep_running = true;
 /* Global simulator settings, defined in lv_linux_backend.c */
 extern simulator_settings_t settings;
 
@@ -53,6 +53,11 @@ static void print_lvgl_version(void)
             LVGL_VERSION_MINOR,
             LVGL_VERSION_PATCH,
             LVGL_VERSION_INFO);
+}
+
+static void int_handler(int dummy) {
+    (void)dummy;
+    keep_running = false;
 }
 
 /**
@@ -129,8 +134,11 @@ static void configure_simulator(int argc, char **argv)
  * @param argc the count of arguments in argv
  * @param argv The arguments
  */
+// ...existing code...
 int main(int argc, char **argv)
 {
+    /* 注册信号处理 */
+    signal(SIGINT, int_handler);
 
     configure_simulator(argc, argv);
 
@@ -153,8 +161,20 @@ int main(int argc, char **argv)
     lv_demo_widgets();
     lv_demo_widgets_start_slideshow();
 
-    /* Enter the run loop of the selected backend */
-    driver_backends_run_loop();
+    /* Enter the run loop */
+    // 替换原来的 driver_backends_run_loop();
+    printf("LVGL running... Press Ctrl+C to exit.\n");
+    while(keep_running) {
+        /* 处理 LVGL 定时器任务 */
+        uint32_t time_till_next = lv_timer_handler();
+        
+        /* 睡眠一段时间以降低 CPU 占用 */
+        /* 如果 time_till_next 太大，限制最大睡眠时间，保证响应性 */
+        if(time_till_next > 50) time_till_next = 50;
+        usleep(time_till_next * 1000);
+    }
 
+    printf("\nExiting...\n");
+    lv_deinit(); // 可选：清理 LVGL 资源
     return 0;
 }
