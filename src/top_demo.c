@@ -19,6 +19,7 @@ typedef struct {
     lv_obj_t * chart;
     lv_chart_series_t * ser;
     lv_obj_t * win;
+    lv_obj_t * label_top_output; 
     const char * title;
     int (*get_value_cb)(void);
     int last_value;
@@ -30,7 +31,6 @@ typedef struct {
  static long mem_total_kb = 0;
 static long mem_used_kb = 0;
 static monitor_item_t cpu_mon;
-static monitor_item_t gpu_mon;
 static monitor_item_t mem_mon;
 static lv_timer_t * monitor_timer;
 
@@ -93,6 +93,40 @@ static int get_mem_usage(void)
     return (int)(mem_used_kb * 100 / mem_total_kb);
 }
 
+static void update_process_table(lv_obj_t * label)
+{
+    if(!label) return;
+
+    /* 使用 ps 命令，因为它比 top 更稳定 */
+    /* 格式: PID, USER, COMMAND */
+    FILE *fp = popen("ps | head -n 10", "r");
+    if (fp == NULL) return;
+
+    char buf[1024] = ""; 
+    char line[128];
+    
+    /* 清空缓冲区 */
+    buf[0] = '\0';
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        /* 简单的长度检查 */
+        if (strlen(buf) + strlen(line) < sizeof(buf) - 1) {
+            strcat(buf, line);
+        } else {
+            break; // 缓冲区满了，停止读取
+        }
+    }
+    pclose(fp);
+
+    /* [关键调试] 如果 buf 为空，强制显示错误信息 */
+    if (strlen(buf) < 2) {
+        lv_label_set_text(label, "Command returned empty string");
+    } else {
+        /* 正常设置文本 */
+        lv_label_set_text(label, buf);
+    }
+}
+
 /*********************
  *  UI FUNCTIONS
  *********************/
@@ -151,7 +185,7 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
     lv_obj_add_event_cb(btn, close_win_cb, LV_EVENT_CLICKED, item->win);
     
     lv_obj_add_flag(item->win, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_size(item->win, 600, 400);
+    lv_obj_set_size(item->win, 600, 500);
     lv_obj_center(item->win);
 
     /* 获取窗口内容容器 */
@@ -165,8 +199,8 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
        修改: 将图表行设为 FR(1) 依然没问题，关键是让 X 轴紧贴上去。
        我们把 X 轴行高设为 LV_GRID_CONTENT，让它紧凑一点。
     */
-    static int32_t col_dsc[] = {40, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST}; // Y轴宽度减小到40
-    static int32_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_TEMPLATE_LAST};
+    static int32_t col_dsc[] = {40, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+    static int32_t row_dsc[] = {LV_GRID_FR(2), LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_FR(3), LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(win_content, col_dsc, row_dsc);
 
     /* --- Y 轴刻度 --- */
@@ -222,6 +256,25 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
     /* 稍微向上一点 */
     lv_obj_set_style_margin_top(x_label, -5, 0);
 
+
+        item->label_top_output = lv_label_create(win_content);
+        lv_obj_set_grid_cell(item->label_top_output, LV_GRID_ALIGN_START, 1, 1, LV_GRID_ALIGN_START, 3, 1);
+        
+        /* [关键修改 1] 设置更小的字体，防止内容过多显示不下 */
+        lv_obj_set_style_text_font(item->label_top_output, &lv_font_montserrat_14, 0); 
+        // 如果没有 10 号字体，请使用 &lv_font_montserrat_14 并减少显示的行数
+        
+        /* [关键修改 2] 强制设置宽度和换行模式 */
+        lv_obj_set_width(item->label_top_output, 500); // 设置一个足够大的固定宽度
+        lv_label_set_long_mode(item->label_top_output, LV_LABEL_LONG_WRAP); // 允许换行
+        
+        /* [关键修改 3] 设置对齐和背景，方便调试看到它在哪里 */
+        lv_obj_set_style_bg_color(item->label_top_output, lv_palette_lighten(LV_PALETTE_GREY, 4), 0);
+        lv_obj_set_style_bg_opa(item->label_top_output, LV_OPA_COVER, 0);
+        
+        lv_label_set_text(item->label_top_output, "Waiting for data...");
+    
+
     /* 添加数据系列 */
     item->ser = lv_chart_add_series(item->chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
 }
@@ -229,22 +282,20 @@ static void create_monitor_widget(lv_obj_t * parent, monitor_item_t * item, cons
 static void update_timer_cb(lv_timer_t * timer)
 {
     (void)timer;
-    monitor_item_t * items[] = {&cpu_mon, &gpu_mon, &mem_mon};
+    monitor_item_t * items[] = {&cpu_mon, &mem_mon};
 
-    for(int i=0; i<3; i++) {
+    for(int i=0; i<2; i++) {
         monitor_item_t * item = items[i];
         if(!item->get_value_cb) continue;
 
         int val = item->get_value_cb();
         item->last_value = val;
 
-        /* 更新 Arc */
+        /* 更新 Arc 和 Label */
         lv_arc_set_value(item->arc, val);
         lv_label_set_text_fmt(item->label_val, "%d%%", val);
 
-        /* [新增] 如果是内存监视器，更新具体数值标签 */
         if(item == &mem_mon) {
-            // 将 KB 转换为 MB 显示
             int used_mb = mem_used_kb / 1024;
             int total_mb = mem_total_kb / 1024;
             lv_label_set_text_fmt(item->label_info, "%dMB / %dMB", used_mb, total_mb);
@@ -253,6 +304,12 @@ static void update_timer_cb(lv_timer_t * timer)
         /* 更新折线图 */
         if(item->chart) {
             lv_chart_set_next_value(item->chart, item->ser, val);
+        }
+        
+        /* [新增] 如果窗口是可见的，且是 CPU 监视器，更新进程表 */
+        /* 检查窗口是否隐藏，避免后台更新浪费资源 */
+        if (item->label_top_output && item->win && !lv_obj_has_flag(item->win, LV_OBJ_FLAG_HIDDEN)) {
+            update_process_table(item->label_top_output);
         }
     }
 }
